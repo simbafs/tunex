@@ -1,0 +1,78 @@
+package main
+
+import (
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httputil"
+)
+
+type Proxy struct {
+	proxyMap map[string]ProxyDest
+}
+
+func (p *Proxy) ServeHTTP(wr http.ResponseWriter, req *http.Request) {
+	log.Println("Got request", req.URL.String())
+
+	if to, ok := p.proxyMap[req.Host]; ok {
+		p.doProxy(to.Host, to.isHttps, wr, req)
+		return
+	}
+
+	fmt.Fprintf(wr, "No proxy for %s", req.Host)
+}
+
+func (p *Proxy) doProxy(to string, isHttps bool, wr http.ResponseWriter, req *http.Request) {
+	log.Println("Got request", req.URL.String())
+
+	// log.Printf("req: %#v\n", req.URL)
+	// log.Printf("host: %s\n", req.Host)
+
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.Host = ""
+			pr.Out.URL.Host = to
+			log.Printf("isHttps: %v\n", isHttps)
+			if isHttps {
+				pr.Out.URL.Scheme = "https"
+			} else {
+				pr.Out.URL.Scheme = "http"
+			}
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			resp.Header.Del("Location")
+			log.Printf("res header: %#v\n", resp.Header)
+			return nil
+		},
+	}
+
+	proxy.ServeHTTP(wr, req)
+}
+
+type ProxyDest struct {
+	Host    string
+	isHttps bool
+}
+
+func main() {
+	proxy := &Proxy{
+		proxyMap: map[string]ProxyDest{
+			"localhost:3000": {
+				Host:    "localhost:4000",
+				isHttps: false,
+			},
+			"github.localhost:3000": {
+				Host:    "github.com",
+				isHttps: true,
+			},
+			"youtube.localhost:3000": {
+				Host:    "youtube.com",
+				isHttps: true,
+			},
+		},
+	}
+
+	if err := http.ListenAndServe("0.0.0.0:3000", proxy); err != nil {
+		log.Fatalf("ListenAndServe: %v\n", err)
+	}
+}
