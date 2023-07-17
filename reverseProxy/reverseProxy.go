@@ -1,4 +1,4 @@
-package main
+package reverseproxy
 
 import (
 	"fmt"
@@ -50,25 +50,32 @@ type ProxyDest struct {
 	IsHttps bool
 }
 
+type ProxyMap map[string]ProxyDest
+
+// Proxy is a HTTP reverse proxy.
+// http.ListenAndServe(":3000", &Proxy{...})
 type Proxy struct {
-	proxyMap map[string]ProxyDest
+	// Addr should be in the form of "host:port"
+	Addr     string
+	ProxyMap ProxyMap
 }
 
 func (p *Proxy) ServeHTTP(wr http.ResponseWriter, req *http.Request) {
-	log.Println("Got request", req.URL.String())
+	subdomain := strings.Split(req.Host, ".")[0]
 
-	if dest, ok := p.proxyMap[req.Host]; ok {
+	if dest, ok := p.ProxyMap[subdomain]; ok {
+		log.Printf("subdomain: %s -> %s", subdomain, dest.Host)
 		p.doProxy(dest.Host, dest.IsHttps, wr, req)
 		return
 	}
 
+	log.Printf("subdomain: %s -> unknown", subdomain)
 	wr.WriteHeader(http.StatusNotFound)
 	fmt.Fprintf(wr, "<h1>No proxy for %s</h1>", req.Host)
 }
 
 func (p *Proxy) doProxy(to string, isHttps bool, wr http.ResponseWriter, req *http.Request) {
 	// also see https://cs.opensource.google/go/go/+/refs/tags/go1.20.6:src/net/http/httputil/reverseproxy.go
-	log.Printf("Proxying %s to %s, path: %s\n", req.Host, to, req.URL.Path)
 
 	// Rewrite Request
 
@@ -93,7 +100,7 @@ func (p *Proxy) doProxy(to string, isHttps bool, wr http.ResponseWriter, req *ht
 	res, err := client.Do(req)
 	if err != nil {
 		log.Println("Error:", err)
-		fmt.Fprintf(wr, "Error: %s", err)
+		fmt.Fprintf(wr, "<h1>Something error</h1>")
 		return
 	}
 
@@ -105,30 +112,4 @@ func (p *Proxy) doProxy(to string, isHttps bool, wr http.ResponseWriter, req *ht
 
 	wr.WriteHeader(res.StatusCode)
 	io.Copy(wr, res.Body)
-}
-
-func main() {
-	addr := "127.0.0.1:3000"
-
-	handler := &Proxy{
-		proxyMap: map[string]ProxyDest{
-			"localhost:3000": {
-				Host:    "localhost:4000",
-				IsHttps: false,
-			},
-			"github.localhost:3000": {
-				Host:    "github.com",
-				IsHttps: false,
-			},
-			"youtube.localhost:3000": {
-				Host:    "youtube.com",
-				IsHttps: false,
-			},
-		},
-	}
-
-	log.Println("Starting proxy server on", addr)
-	if err := http.ListenAndServe(addr, handler); err != nil {
-		log.Fatal("ListenAndServe:", err)
-	}
 }

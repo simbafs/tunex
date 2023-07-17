@@ -1,4 +1,4 @@
-module ssh
+module tunex
 
 go 1.20
 
