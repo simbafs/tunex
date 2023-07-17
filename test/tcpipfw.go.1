@@ -1,0 +1,167 @@
+package main
+
+import (
+	"fmt"
+	"io"
+	"io/ioutil"
+	"log"
+	"net"
+
+	"golang.org/x/crypto/ssh"
+)
+
+func main() {
+	if err := StartTcpServer(); err != nil {
+		fmt.Println("Oops, there's and error: %w\n", err)
+	}
+}
+
+func GetHostKey(keyPath string) (ssh.Signer, error) {
+	privateBytes, err := ioutil.ReadFile(keyPath)
+	if err != nil {
+		return nil, err
+	}
+
+	private, err := ssh.ParsePrivateKey(privateBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	return private, nil
+}
+
+func StartTcpServer() error {
+	private, err := GetHostKey("./key/host")
+	if err != nil {
+		return fmt.Errorf("unable to read private key: %w", err)
+	}
+
+	sshConf := &ssh.ServerConfig{
+		NoClientAuth: true,
+	}
+	sshConf.AddHostKey(private)
+
+	listener, err := net.ListenTCP("tcp", &net.TCPAddr{
+		IP:   net.IPv4(0, 0, 0, 0),
+		Port: 2222,
+	})
+	if err != nil {
+		return fmt.Errorf("unable to listen: %w", err)
+	}
+	defer listener.Close()
+
+	log.Printf("Listening on %s\n", listener.Addr().String())
+	for {
+		// accept a tcp connection
+		tcpConn, err := listener.AcceptTCP()
+		if err != nil {
+			log.Printf("Unable to accept connection: %v\n", err)
+			continue
+		}
+		defer tcpConn.Close()
+
+		tcpConn.SetKeepAlive(true)
+
+		StartSshServer(tcpConn, sshConf)
+	}
+}
+
+func StartSshServer(tcpConn *net.TCPConn, sshConf *ssh.ServerConfig) {
+	// establish a ssh connection over tcp connection
+	sshConn, _, reqs, err := ssh.NewServerConn(tcpConn, sshConf)
+	if err != nil {
+		log.Printf("Unable to handshake: %v\n", err)
+		return
+	}
+	defer sshConn.Close()
+
+	log.Printf("Connection from %s\n", sshConn.RemoteAddr())
+
+	// accept all channels
+	// go handleChannels(chans, sshConn)
+
+	for req := range reqs {
+		switch req.Type {
+		case "tcpip-forward":
+			logf := func(format string, args ...interface{}) {
+				log.Printf("tcpip-forward: "+format, args...)
+			}
+			var payload struct {
+				Addr string
+				Port uint32
+			}
+			if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
+				logf("Unable to unmarshal payload: %v\n", err)
+			}
+			logf("tcpip-forward: %s:%d\n", payload.Addr, payload.Port)
+			logf("want reply: %v\n", req.WantReply)
+
+			listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", payload.Addr, payload.Port))
+			if err != nil {
+				logf("Unable to dial: %v\n", err)
+			}
+
+			req.Reply(true, nil)
+
+			// open channel to for tcpip forward baseon rfc 4254 7.2
+			channel, _, err := sshConn.OpenChannel("forwarded-tcpip", ssh.Marshal(struct {
+				Addr       string
+				Port       uint32
+				OriginAddr string
+				OriginPort uint32
+			}{
+				payload.Addr,
+				payload.Port,
+				sshConn.RemoteAddr().String(),
+				uint32(sshConn.RemoteAddr().(*net.TCPAddr).Port),
+			}))
+			if err != nil {
+				logf("Unable to open channel: %v\n", err)
+				continue
+			}
+
+			for {
+				conn, err := listener.Accept()
+				if err != nil {
+					logf("Unable to accept: %v\n", err)
+				}
+
+				// var once sync.Once
+				// close := func() {
+				// 	logf("Closing connection")
+				// 	conn.Close()
+				// 	channel.Close()
+				// }
+
+				go func() {
+					// for {
+					_, err := io.Copy(channel, conn)
+					if err != nil {
+						logf("Unable to copy: %v\n", err)
+					}
+					logf("EOF from remote")
+
+					// conn.Close()
+					// channel.Close()
+					// once.Do(close)
+				}()
+
+				go func() {
+					// for {
+					_, err := io.Copy(conn, channel)
+					if err != nil {
+						logf("Unable to copy: %v\n", err)
+					}
+					logf("EOF from local")
+					// }
+					// conn.Close()
+					// channel.Close()
+					// once.Do(close)
+				}()
+			}
+
+		default:
+			log.Printf("Global Req: Unknown request: %s\n", req.Type)
+		}
+	}
+}
