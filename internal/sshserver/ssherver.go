@@ -3,6 +3,7 @@ package sshserver
 import (
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net"
 	"tunex/internal/logf"
 	"tunex/internal/tunnelmap"
@@ -10,10 +11,21 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+func CompareKey(key ssh.PublicKey, pubKeyStr string) bool {
+	// compare two keys
+	pubKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubKeyStr))
+	if err != nil {
+		return false
+	}
+
+	return ssh.FingerprintSHA256(key) == ssh.FingerprintSHA256(pubKey)
+}
+
 type SSHServer struct {
-	Addr      string
-	Port      int
-	TunnelMap *tunnelmap.TunnelMap
+	Addr        string
+	Port        int
+	TunnelMap   *tunnelmap.TunnelMap
+	AllowedUser map[string][]string
 }
 
 func NewSSHServer(addr string, port int, tunnelMap *tunnelmap.TunnelMap) *SSHServer {
@@ -21,6 +33,11 @@ func NewSSHServer(addr string, port int, tunnelMap *tunnelmap.TunnelMap) *SSHSer
 		Addr:      addr,
 		Port:      port,
 		TunnelMap: tunnelMap,
+		AllowedUser: map[string][]string{
+			"simba": {
+				"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHcLVJDmYggMFXJ3CqMOSMnBkkDX1982cdd3rmRqfpMC simba@simba-nb",
+			},
+		},
 	}
 }
 
@@ -33,7 +50,31 @@ func (s *SSHServer) Start() error {
 	}
 
 	sshConf := &ssh.ServerConfig{
-		NoClientAuth: true,
+		NoClientAuth: false,
+		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			// log.Printf("key: %s\n", ssh.FingerprintSHA256(key))
+			// find if the public key is in the allowed list
+			for user, keys := range s.AllowedUser {
+				for _, pubKey := range keys {
+					if CompareKey(key, pubKey) {
+						log.Printf("User %q authenticated with key %s\n", user, ssh.FingerprintSHA256(key))
+
+						return &ssh.Permissions{
+							Extensions: map[string]string{
+								"user":  user,
+								"pk-fp": ssh.FingerprintSHA256(key),
+							},
+						}, nil
+					}
+				}
+			}
+			return &ssh.Permissions{
+				Extensions: map[string]string{
+					"user":  "anonymous",
+					"pk-fp": "anonymous",
+				},
+			}, nil
+		},
 	}
 	sshConf.AddHostKey(private)
 
@@ -53,6 +94,13 @@ func (s *SSHServer) Start() error {
 
 	for {
 		tcpConn, err := listener.AcceptTCP()
+		defer func() {
+			tcpConn.Close()
+			logf("TCP connection from %s closed\n", tcpConn.RemoteAddr())
+		}()
+
+		tcpConn.SetKeepAlive(true)
+
 		if err != nil {
 			logf("Unable to accept connection: %v\n", err)
 			continue
@@ -78,12 +126,6 @@ func GetHostKey(keyPath string) (ssh.Signer, error) {
 
 func (s *SSHServer) handleSSHConnection(tcpConn *net.TCPConn, sshConf *ssh.ServerConfig) {
 	logf := logf.New("HandleSSHConnection")
-	defer func() {
-		tcpConn.Close()
-		logf("TCP connection from %s closed\n", tcpConn.RemoteAddr())
-	}()
-
-	tcpConn.SetKeepAlive(true)
 
 	name := ""
 
@@ -97,6 +139,8 @@ func (s *SSHServer) handleSSHConnection(tcpConn *net.TCPConn, sshConf *ssh.Serve
 		logf("SSH connection from %s closed\n", sshConn.RemoteAddr())
 		s.TunnelMap.Del(name)
 	}()
+
+	logf("Extensions: %v", sshConn.Permissions.Extensions)
 
 	logf("Connection from %s\n", sshConn.RemoteAddr())
 
