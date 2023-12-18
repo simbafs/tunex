@@ -2,8 +2,6 @@ module tunex
 
 go 1.20
 
-require (
-	github.com/creack/pty v1.1.18 // indirect
-	golang.org/x/crypto v0.11.0 // indirect
-	golang.org/x/sys v0.10.0 // indirect
-)
+require golang.org/x/crypto v0.17.0
+
+require golang.org/x/sys v0.15.0 // indirect
